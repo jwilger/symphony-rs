@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{DomainError, validation_to_domain_error};
 use crate::issue::{IssueStateName, parse_issue_state};
-use crate::normalization::{has_path_separator, parse_comma_separated};
+use crate::normalization::parse_comma_separated;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -265,8 +265,4 @@ pub fn parse_env_resolved_value(raw: &str) -> Result<EnvResolvedValue, DomainErr
     }
 
     Ok(EnvResolvedValue::Literal(trimmed.to_string()))
-}
-
-pub fn workspace_root_is_relative_without_separator(root: &WorkspaceRoot) -> bool {
-    !has_path_separator(root.value())
 }

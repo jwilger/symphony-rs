@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use clap::Parser;
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -39,11 +39,10 @@ use symphony_domain::{
 
 use crate::ui::{DashboardModel, DashboardRow, render_dashboard};
 
-const CONTINUATION_RETRY_DELAY_MS: u64 = 1_000;
 const DEFAULT_PROMPT: &str = "You are working on an issue from Linear.";
 const CONTINUATION_PROMPT: &str =
     "Continue from prior thread context and make the next concrete progress step on this issue.";
-const MAX_PROTOCOL_LINE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_PROTOCOL_LINE_BYTES: usize = 10_485_760;
 const RECENT_EVENT_LIMIT: usize = 25;
 
 #[derive(Debug, Clone, Parser)]
@@ -625,9 +624,7 @@ impl Orchestrator {
                 let mut events = self.shared.recent_events.lock().await;
                 let buffer = events.entry(issue_id).or_insert_with(VecDeque::new);
                 buffer.push_front(RecentEvent { at, event, message });
-                while buffer.len() > RECENT_EVENT_LIMIT {
-                    let _ = buffer.pop_back();
-                }
+                buffer.truncate(RECENT_EVENT_LIMIT);
             }
             ServiceEvent::RetryDue { issue_id } => {
                 self.retry_handles.remove(&issue_id);
@@ -741,11 +738,7 @@ impl Orchestrator {
         let plan = RetryPlan {
             issue_id: issue_id.clone(),
             attempt,
-            due_after_ms: if attempt == 1 {
-                CONTINUATION_RETRY_DELAY_MS
-            } else {
-                symphony_core::failure_backoff_ms(attempt, max_backoff)
-            },
+            due_after_ms: symphony_core::failure_backoff_ms(attempt, max_backoff),
             error: Some(error_message),
         };
 
@@ -872,7 +865,7 @@ impl Orchestrator {
                         .last_codex_timestamp
                         .unwrap_or(entry.started_at);
                     let elapsed = now.signed_duration_since(reference).num_milliseconds();
-                    if elapsed > stall_timeout_ms {
+                    if is_stalled(elapsed, stall_timeout_ms) {
                         Some(issue_id.clone())
                     } else {
                         None
@@ -1486,14 +1479,12 @@ async fn run_codex_turn_loop(
         let turn_outcome = io
             .stream_turn(launch.config.codex.turn_timeout_ms.value())
             .await
-            .map_err(|error| match error {
-                AppError::ProtocolError(value) if value == "turn_timeout" => {
-                    WorkerExitReason::TimedOut
+            .map_err(|error| {
+                if let Some(code) = protocol_retry_error(&error) {
+                    WorkerExitReason::Failed(code.to_string())
+                } else {
+                    WorkerExitReason::Failed(error.to_string())
                 }
-                AppError::ProtocolError(value) if value == "turn_input_required" => {
-                    WorkerExitReason::Failed("turn_input_required".to_string())
-                }
-                _ => WorkerExitReason::Failed(error.to_string()),
             })?;
 
         match turn_outcome {
@@ -1664,9 +1655,13 @@ impl<'a> CodexIo<'a> {
             return Err(AppError::ProtocolError("turn_input_required".to_string()));
         }
 
-        if message.get("id").is_some() && method.contains("approval") {
+        let Some(request_id) = message.get("id").cloned() else {
+            return Ok(());
+        };
+
+        if method.contains("approval") {
             self.send_json(&serde_json::json!({
-                "id": message.get("id"),
+                "id": request_id,
                 "result": { "approved": true },
             }))
             .await?;
@@ -1679,7 +1674,7 @@ impl<'a> CodexIo<'a> {
             return Ok(());
         }
 
-        if message.get("id").is_some() && method.contains("tool") && method.contains("call") {
+        if method.contains("tool/call") {
             self.handle_tool_call(&message).await?;
             return Ok(());
         }
@@ -2086,17 +2081,9 @@ fn spawn_workflow_watcher(
 
     let mut watcher = RecommendedWatcher::new(
         move |event: notify::Result<notify::Event>| {
-            let Ok(event) = event else {
+            let Ok(_event) = event else {
                 return;
             };
-
-            let changed = matches!(
-                event.kind,
-                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-            );
-            if !changed {
-                return;
-            }
 
             match load_workflow_file(&callback_path) {
                 Ok(loaded) => {
@@ -2170,13 +2157,18 @@ async fn stop_codex_child(mut child: Child) -> Result<(), AppError> {
         return Ok(());
     }
 
+    match child.try_wait() {
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => {}
+        Err(error) => return Err(AppError::CodexError(error.to_string())),
+    }
+
     if let Err(error) = child.kill().await {
-        if let Some(io_error) = error.raw_os_error()
-            && io_error == 3
-        {
-            return Ok(());
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => return Err(AppError::CodexError(error.to_string())),
+            Err(wait_error) => return Err(AppError::CodexError(wait_error.to_string())),
         }
-        return Err(AppError::CodexError(error.to_string()));
     }
 
     child
@@ -2194,9 +2186,7 @@ async fn log_stderr(stderr: tokio::process::ChildStderr) {
             Ok(0) => break,
             Ok(_) => {
                 let text = line.trim();
-                if !text.is_empty() {
-                    debug!(stream = "stderr", message = text, "codex-app-server");
-                }
+                debug!(stream = "stderr", message = text, "codex-app-server");
             }
             Err(error) => {
                 debug!(reason = %error, "failed reading codex stderr");
@@ -2329,6 +2319,17 @@ fn extract_string(message: &Value, path: &[&str]) -> Option<String> {
     current.as_str().map(ToOwned::to_owned)
 }
 
+fn protocol_retry_error(error: &AppError) -> Option<&str> {
+    let AppError::ProtocolError(value) = error else {
+        return None;
+    };
+
+    match value.as_str() {
+        "turn_timeout" | "turn_input_required" => Some(value.as_str()),
+        _ => None,
+    }
+}
+
 fn contains_user_input_required(message: &Value) -> bool {
     let method = message
         .get("method")
@@ -2432,6 +2433,10 @@ fn epoch_millis() -> u64 {
         .unwrap_or(0)
 }
 
+fn is_stalled(elapsed_ms: i64, stall_timeout_ms: i64) -> bool {
+    elapsed_ms > stall_timeout_ms
+}
+
 fn configure_logging() {
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(
@@ -2459,7 +2464,7 @@ mod tests {
 
     use super::{
         DispatchPolicy, RetryAction, decide_retry_action, graphql_operation_count,
-        initial_runtime_state, parse_state_set, register_running_issue,
+        initial_runtime_state, is_stalled, parse_state_set, register_running_issue,
     };
 
     fn make_issue(identifier: &str, state: &str) -> Issue {
@@ -2551,5 +2556,12 @@ mod tests {
 
         let action = decide_retry_action(&issue, &runtime, &policy);
         assert_eq!(action, RetryAction::ReleaseClaim);
+    }
+
+    #[test]
+    fn stall_detection_requires_elapsed_to_exceed_timeout() {
+        assert!(is_stalled(1_001, 1_000));
+        assert!(!is_stalled(1_000, 1_000));
+        assert!(!is_stalled(999, 1_000));
     }
 }

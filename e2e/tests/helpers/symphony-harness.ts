@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -26,7 +26,17 @@ type HarnessOptions = {
   issues: MockIssue[];
   stateRefreshSequenceByIssueId?: Record<string, string[]>;
   codexTurnDelayMs?: number;
-  codexMode?: "success" | "turn-failed" | "turn-cancelled" | "input-required" | "stall" | "unsupported-tool";
+  codexMode?:
+    | "success"
+    | "turn-failed"
+    | "turn-cancelled"
+    | "input-required"
+    | "stall"
+    | "unsupported-tool"
+    | "approval-required"
+    | "id-notification"
+    | "linear-multi-operation"
+    | "success-and-exit";
   codexCommandOverride?: string;
   pollIntervalMs?: number;
   appPort?: number;
@@ -65,6 +75,7 @@ type SymphonyHarness = {
   appBaseUrl: string;
   workflowPath: string;
   workspaceRoot: string;
+  codexTranscriptPath: string;
   logs: string[];
   triggerRefresh: () => Promise<void>;
   getState: () => Promise<any>;
@@ -75,6 +86,30 @@ const E2E_ROOT = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const REPO_ROOT = resolve(E2E_ROOT, "..");
 const CARGO_MANIFEST_PATH = join(REPO_ROOT, "Cargo.toml");
 const FAKE_CODEX_PATH = join(E2E_ROOT, "fixtures", "fake-codex-app-server.mjs");
+const DEFAULT_STARTUP_TIMEOUT_MS = 120_000;
+
+let nextHarnessPort = 4173;
+
+function allocateHarnessPort(explicitPort: number | undefined): number {
+  if (explicitPort !== undefined) {
+    return explicitPort;
+  }
+
+  const port = nextHarnessPort;
+  nextHarnessPort += 1;
+  return port;
+}
+
+function parseStartupTimeoutMs(raw: string | undefined): number {
+  if (!raw) {
+    return DEFAULT_STARTUP_TIMEOUT_MS;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    return DEFAULT_STARTUP_TIMEOUT_MS;
+  }
+  return parsed;
+}
 
 async function readJsonBody(request: IncomingMessage): Promise<any> {
   const chunks: Buffer[] = [];
@@ -263,6 +298,7 @@ async function writeWorkflowFile(args: {
   appPort: number;
   codexTurnDelayMs: number;
   codexMode: HarnessOptions["codexMode"];
+  codexTranscriptPath: string;
   codexCommandOverride?: string;
   pollIntervalMs: number;
   maxConcurrentAgents: number;
@@ -286,6 +322,8 @@ async function writeWorkflowFile(args: {
         String(args.codexTurnDelayMs),
         "--mode",
         codexMode,
+        "--transcript-path",
+        args.codexTranscriptPath,
       ].join(" ");
 
   const activeStates = args.activeStates.join(", ");
@@ -355,13 +393,42 @@ async function waitFor(
   throw new Error(errorMessage);
 }
 
+async function allocateLoopbackPort(): Promise<number> {
+  return await new Promise<number>((resolvePort, rejectPort) => {
+    const server = createServer((_request, response) => {
+      response.writeHead(204);
+      response.end();
+    });
+
+    server.once("error", rejectPort);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close();
+        rejectPort(new Error("failed to allocate loopback port"));
+        return;
+      }
+
+      const { port } = address;
+      server.close((error) => {
+        if (error) {
+          rejectPort(error);
+          return;
+        }
+        resolvePort(port);
+      });
+    });
+  });
+}
+
 export async function startSymphonyHarness(options: HarnessOptions): Promise<SymphonyHarness> {
   const tempRoot = await mkdtemp(join(tmpdir(), "symphony-rs-e2e-"));
   const workspaceRoot = join(tempRoot, "workspaces");
   const workflowPath = join(tempRoot, "WORKFLOW.md");
+  const codexTranscriptPath = join(tempRoot, "codex-transcript.json");
 
   const linearServer = await startMockLinearServer(options);
-  const appPort = options.appPort ?? 4173;
+  const appPort = options.appPort ?? (await allocateLoopbackPort());
   const hookDefaults = {
     afterCreate: "true",
     beforeRun: "true",
@@ -377,6 +444,7 @@ export async function startSymphonyHarness(options: HarnessOptions): Promise<Sym
     appPort,
     codexTurnDelayMs: options.codexTurnDelayMs ?? 100,
     codexMode: options.codexMode ?? "success",
+    codexTranscriptPath,
     codexCommandOverride: options.codexCommandOverride,
     pollIntervalMs: options.pollIntervalMs ?? 120_000,
     maxConcurrentAgents: options.maxConcurrentAgents ?? 2,
@@ -400,21 +468,42 @@ export async function startSymphonyHarness(options: HarnessOptions): Promise<Sym
     await writeFile(join(workspacePath, ".precreated"), "1\n", "utf8");
   }
 
-  const baseArgs = ["run", "--manifest-path", CARGO_MANIFEST_PATH, "-p", "symphony-app", "--"];
-  const args = options.useDefaultWorkflowPath
-    ? [...baseArgs, "--port", String(appPort)]
-    : [...baseArgs, workflowPath, "--port", String(appPort)];
+  const appArgs = options.useDefaultWorkflowPath
+    ? ["--port", String(appPort)]
+    : [workflowPath, "--port", String(appPort)];
 
   const logs: string[] = [];
   const appCwd = options.useDefaultWorkflowPath ? tempRoot : REPO_ROOT;
-  const appProcess = spawn("cargo", args, {
-    cwd: appCwd,
-    env: {
-      ...process.env,
-      LINEAR_API_KEY: process.env.LINEAR_API_KEY ?? "e2e-token",
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const preferredBinary = process.env.SYMPHONY_APP_BIN
+    ? resolve(process.env.SYMPHONY_APP_BIN)
+    : join(REPO_ROOT, "target", "debug", "symphony-app");
+  const runEnv = {
+    ...process.env,
+    LINEAR_API_KEY: process.env.LINEAR_API_KEY ?? "e2e-token",
+  };
+  const useBinary = await (async () => {
+    try {
+      await access(preferredBinary);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  const appProcess = useBinary
+    ? spawn(preferredBinary, appArgs, {
+        cwd: appCwd,
+        env: runEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+    : spawn(
+        "cargo",
+        ["run", "--manifest-path", CARGO_MANIFEST_PATH, "-p", "symphony-app", "--", ...appArgs],
+        {
+          cwd: appCwd,
+          env: runEnv,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
 
   appProcess.stdout?.on("data", (chunk: Buffer) => {
     const rendered = chunk.toString("utf8");
@@ -428,6 +517,7 @@ export async function startSymphonyHarness(options: HarnessOptions): Promise<Sym
   });
 
   const appBaseUrl = `http://127.0.0.1:${appPort}`;
+  const startupTimeoutMs = parseStartupTimeoutMs(process.env.SYMPHONY_HARNESS_STARTUP_TIMEOUT_MS);
 
   await waitFor(
     async () => {
@@ -438,7 +528,7 @@ export async function startSymphonyHarness(options: HarnessOptions): Promise<Sym
         return false;
       }
     },
-    120_000,
+    startupTimeoutMs,
     "timed out waiting for symphony app to start",
   );
 
@@ -446,6 +536,7 @@ export async function startSymphonyHarness(options: HarnessOptions): Promise<Sym
     appBaseUrl,
     workflowPath,
     workspaceRoot,
+    codexTranscriptPath,
     logs,
     triggerRefresh: async () => {
       const response = await fetch(`${appBaseUrl}/api/v1/refresh`, { method: "POST" });

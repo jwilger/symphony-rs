@@ -21,7 +21,6 @@ pub enum WorkerExitReason {
     Failed(String),
     TimedOut,
     Stalled,
-    CanceledByReconciliation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,10 +72,6 @@ pub fn sort_for_dispatch(issues: &[Issue]) -> Vec<Issue> {
 }
 
 pub fn should_dispatch(issue: &Issue, runtime: &RuntimeState, policy: &DispatchPolicy) -> bool {
-    if !issue.has_required_dispatch_fields() {
-        return false;
-    }
-
     if runtime.running.contains_key(&issue.id) || runtime.claimed.contains(&issue.id) {
         return false;
     }
@@ -159,15 +154,6 @@ pub fn compute_retry_plan(
                 attempt,
                 due_after_ms: failure_backoff_ms(attempt, max_backoff_ms),
                 error: Some("stalled".to_string()),
-            }
-        }
-        WorkerExitReason::CanceledByReconciliation => {
-            let attempt = retry_attempt.unwrap_or(0) + 1;
-            RetryPlan {
-                issue_id,
-                attempt,
-                due_after_ms: failure_backoff_ms(attempt, max_backoff_ms),
-                error: Some("canceled_by_reconciliation".to_string()),
             }
         }
     }

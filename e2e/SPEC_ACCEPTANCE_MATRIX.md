@@ -74,6 +74,8 @@ Legend:
 | CX-007 | 10.6 | Turn timeout is enforced | Given stalled mode and short turn timeout, retry row reports timeout | VALIDATED |
 | CX-008 | 10.6 | Startup/command failure is surfaced as codex failure class | Given invalid codex command, retry row error surfaces startup/transport failure category | VALIDATED |
 | CX-009 | 7.1, 10.3 | Multi-turn continuation increments turn count | Given active issue across turn refreshes and `max_turns > 1`, running row `turn_count` increments | VALIDATED |
+| CX-010 | 7.1, 10.2 | Continuation turns reuse thread context without resending the full issue prompt | Given active issue across multiple turns, Codex transcript shows the rendered issue prompt only on the first turn | VALIDATED |
+| CX-011 | 10.5 | Approval requests are auto-approved without stalling the run | Given approval-required mode, recent issue events include `approval_auto_approved` and the turn continues | VALIDATED |
 
 ## HTTP Extension and API Contract
 
@@ -101,3 +103,24 @@ Legend:
 - Validation evidence:
   - `cd e2e && bun run test:e2e tests/acceptance.spec.ts --reporter=line --workers=1`
   - Result: `46 passed`
+
+## Mutation Testing Integration
+
+Purpose:
+- Ensure `cargo-mutants` exercises user-facing acceptance behavior, not only Rust unit/integration tests.
+
+Implementation:
+- `cargo-mutants` config: `.cargo/mutants.toml`
+  - Enables `test_workspace = true`
+  - Adds `-- --include-ignored` so ignored mutation-specific tests are executed.
+  - Sets `minimum_test_timeout = 180` to allow browser-backed mutation checks to complete.
+- Rust mutation bridge test: `crates/symphony-app/tests/playwright_acceptance.rs`
+  - Executes Playwright smoke acceptance suite during mutation runs.
+- Playwright mutation suite: `e2e/tests/mutants-smoke.spec.ts`
+  - Covers dispatch lifecycle, exact timeout/input-required error codes, approval auto-resolution, unsupported tool continuity, continuation prompt semantics, stall retry, and invalid workflow reload resilience.
+ - Harness startup timeout can be reduced for mutation probes via `SYMPHONY_HARNESS_STARTUP_TIMEOUT_MS`.
+
+Operational note:
+- The full acceptance suite (`tests/acceptance.spec.ts`) remains the conformance gate.
+- The mutation smoke suite exists to make mutation analysis include representative black-box acceptance coverage at practical runtime.
+- `crates/symphony-app/src/hydrate.rs` remains in the stack for cargo-leptos/browser bootstrap, but its current no-op mutant is excluded from mutation gates until the dashboard ships a browser-observable hydrated control path; current acceptance coverage is intentionally anchored at the SSR/API surface.

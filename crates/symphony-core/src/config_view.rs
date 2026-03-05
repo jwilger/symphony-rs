@@ -6,11 +6,10 @@ use serde_json::Value;
 use crate::error::ConfigError;
 use symphony_domain::{
     AgentConfig, ApprovalPolicy, CodexCommand, CodexConfig, EnvResolvedValue, HookConfig,
-    PollingConfig, PositiveCount, PositiveMs, ProjectSlug, ServerConfig, ServiceConfig,
-    ThreadSandbox, TrackerApiKey, TrackerConfig, TrackerEndpoint, TrackerKind, WorkflowDefinition,
+    PollingConfig, PositiveMs, ProjectSlug, ServerConfig, ServiceConfig, ThreadSandbox,
+    TrackerApiKey, TrackerConfig, TrackerEndpoint, TrackerKind, WorkflowDefinition,
     WorkspaceConfig, parse_env_resolved_value, parse_issue_state, parse_positive_count,
     parse_positive_ms, parse_state_list, parse_workspace_root,
-    workspace_root_is_relative_without_separator,
 };
 
 const DEFAULT_LINEAR_ENDPOINT: &str = "https://api.linear.app/graphql";
@@ -269,8 +268,6 @@ fn read_value(object: &serde_json::Map<String, Value>, key: &str) -> Option<Valu
 fn read_string(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     object.get(key).and_then(|value| match value {
         Value::String(text) => Some(text.clone()),
-        Value::Number(number) => Some(number.to_string()),
-        Value::Bool(value) => Some(value.to_string()),
         _ => None,
     })
 }
@@ -326,7 +323,7 @@ fn resolve_env_string(raw: &str, environment: &HashMap<String, String>) -> Optio
 
 fn expand_workspace_root(raw: &str, environment: &HashMap<String, String>) -> String {
     let resolved = resolve_env_string(raw, environment).unwrap_or_else(|| raw.to_string());
-    let home_expanded = if let Some(stripped) = resolved.strip_prefix("~/") {
+    if let Some(stripped) = resolved.strip_prefix("~/") {
         std::env::var("HOME")
             .map(|home| {
                 PathBuf::from(home)
@@ -337,37 +334,7 @@ fn expand_workspace_root(raw: &str, environment: &HashMap<String, String>) -> St
             .unwrap_or(resolved.clone())
     } else {
         resolved.clone()
-    };
-
-    if let Ok(root) = parse_workspace_root(&home_expanded)
-        && workspace_root_is_relative_without_separator(&root)
-    {
-        return home_expanded;
     }
-
-    home_expanded
-}
-
-pub fn count_running_by_state(
-    running_states: impl Iterator<Item = String>,
-) -> HashMap<String, PositiveCount> {
-    let mut counts = HashMap::<String, u32>::new();
-    for state in running_states {
-        let normalized = state.trim().to_lowercase();
-        counts
-            .entry(normalized)
-            .and_modify(|existing| *existing += 1)
-            .or_insert(1);
-    }
-
-    counts
-        .into_iter()
-        .filter_map(|(state, count)| {
-            PositiveCount::try_new(count)
-                .ok()
-                .map(|valid| (state, valid))
-        })
-        .collect()
 }
 
 pub fn positive_ms_to_u64(value: PositiveMs) -> u64 {

@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use symphony_core::{
-    DispatchPolicy, WorkerExitReason, apply_worker_exit, continuation_delay_ms, failure_backoff_ms,
-    initial_runtime_state, register_running_issue, should_dispatch, sort_for_dispatch,
+    DispatchPolicy, WorkerExitReason, apply_absolute_token_totals, apply_worker_exit,
+    compute_retry_plan, continuation_delay_ms, failure_backoff_ms, initial_runtime_state,
+    parse_running_state_count, register_running_issue, should_dispatch, sort_for_dispatch,
 };
 use symphony_domain::{
     AgentConfig, BlockerRef, CodexTotals, Issue, PositiveCount, parse_issue_id,
@@ -101,8 +102,60 @@ fn todo_with_terminal_blocker_is_dispatchable() {
 }
 
 #[test]
+fn non_active_issue_is_not_dispatchable() {
+    let issue = make_issue("ABC-5B", "Backlog", Some(1), None);
+
+    let runtime = initial_runtime_state(30_000, 10);
+    assert!(!should_dispatch(&issue, &runtime, &dispatch_policy()));
+}
+
+#[test]
+fn issue_is_not_dispatchable_when_state_limit_is_already_reached() {
+    let mut policy = dispatch_policy();
+    policy.agent.max_concurrent_agents_by_state.insert(
+        "in progress".to_string(),
+        PositiveCount::try_new(1).expect("positive count should parse in test helper"),
+    );
+
+    let running_issue = make_issue("ABC-5C", "In Progress", Some(1), None);
+    let retry_issue = make_issue("ABC-5D", "In Progress", Some(2), None);
+    let mut runtime = initial_runtime_state(30_000, 10);
+    register_running_issue(&mut runtime, running_issue, None, Utc::now());
+
+    assert!(!should_dispatch(&retry_issue, &runtime, &policy));
+}
+
+#[test]
 fn continuation_retry_uses_one_second_delay() {
     assert_eq!(continuation_delay_ms(), 1_000);
+}
+
+#[test]
+fn running_state_counts_accumulate_by_normalized_state() {
+    let mut runtime = initial_runtime_state(30_000, 10);
+    register_running_issue(
+        &mut runtime,
+        make_issue("ABC-S1", "In Progress", Some(1), None),
+        None,
+        Utc::now(),
+    );
+    register_running_issue(
+        &mut runtime,
+        make_issue("ABC-S2", "in progress", Some(2), None),
+        None,
+        Utc::now(),
+    );
+    register_running_issue(
+        &mut runtime,
+        make_issue("ABC-S3", "Todo", Some(3), None),
+        None,
+        Utc::now(),
+    );
+
+    let counts = parse_running_state_count(&runtime);
+
+    assert_eq!(counts.get("in progress"), Some(&2));
+    assert_eq!(counts.get("todo"), Some(&1));
 }
 
 #[test]
@@ -151,6 +204,51 @@ fn abnormal_worker_exit_increments_attempt_and_sets_error() {
 
     assert_eq!(retry_entry.attempt, 3);
     assert_eq!(retry_entry.error.as_deref(), Some("boom"));
+}
+
+#[test]
+fn timed_out_worker_exit_uses_incremented_attempt_and_timeout_error() {
+    let issue_id = parse_issue_id("issue-timeout").expect("issue id should parse in test helper");
+
+    let retry_plan = compute_retry_plan(issue_id, Some(2), WorkerExitReason::TimedOut, 300_000);
+
+    assert_eq!(retry_plan.attempt, 3);
+    assert_eq!(retry_plan.due_after_ms, 40_000);
+    assert_eq!(retry_plan.error.as_deref(), Some("turn_timeout"));
+}
+
+#[test]
+fn stalled_worker_exit_uses_incremented_attempt_and_stalled_error() {
+    let issue_id = parse_issue_id("issue-stalled").expect("issue id should parse in test helper");
+
+    let retry_plan = compute_retry_plan(issue_id, Some(2), WorkerExitReason::Stalled, 300_000);
+
+    assert_eq!(retry_plan.attempt, 3);
+    assert_eq!(retry_plan.due_after_ms, 40_000);
+    assert_eq!(retry_plan.error.as_deref(), Some("stalled"));
+}
+
+#[test]
+fn apply_absolute_token_totals_accumulates_deltas_exactly_once() {
+    let issue = make_issue("ABC-TOK", "In Progress", Some(1), None);
+    let issue_id = issue.id.clone();
+    let mut runtime = initial_runtime_state(30_000, 10);
+    register_running_issue(&mut runtime, issue, None, Utc::now());
+
+    apply_absolute_token_totals(&mut runtime, &issue_id, 120, 80, 200);
+    apply_absolute_token_totals(&mut runtime, &issue_id, 150, 90, 240);
+
+    let running = runtime
+        .running
+        .get(&issue_id)
+        .expect("running issue should still exist");
+
+    assert_eq!(running.live_session.codex_input_tokens.value(), 150);
+    assert_eq!(running.live_session.codex_output_tokens.value(), 90);
+    assert_eq!(running.live_session.codex_total_tokens.value(), 240);
+    assert_eq!(runtime.codex_totals.input_tokens.value(), 150);
+    assert_eq!(runtime.codex_totals.output_tokens.value(), 90);
+    assert_eq!(runtime.codex_totals.total_tokens.value(), 240);
 }
 
 #[test]

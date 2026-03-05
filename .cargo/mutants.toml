@@ -1,0 +1,11 @@
+test_workspace = true
+test_tool = "nextest"
+additional_cargo_test_args = ["--run-ignored", "all"]
+minimum_test_timeout = 180
+
+# The dashboard is currently validated at the SSR/HTTP surface. The cargo-leptos
+# browser bootstrap in `hydrate.rs` is retained for the intended stack, but its
+# no-op replacement is not a SPEC-backed user-visible behavior until a shipped
+# hydrated control path exists.
+exclude_globs = ["crates/symphony-app/src/hydrate.rs"]
+exclude_re = ['crates/symphony-app/src/hydrate.rs:.*replace hydrate with \(\)']

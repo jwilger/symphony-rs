@@ -88,31 +88,6 @@ impl IssueStateName {
     }
 }
 
-impl NormalizedState {
-    pub fn value(&self) -> &str {
-        self.as_ref()
-    }
-}
-
-impl Label {
-    pub fn value(&self) -> &str {
-        self.as_ref()
-    }
-}
-
-impl Issue {
-    pub fn normalized_state(&self) -> Result<NormalizedState, DomainError> {
-        parse_normalized_state(self.state.value())
-    }
-
-    pub fn has_required_dispatch_fields(&self) -> bool {
-        !(self.id.value().trim().is_empty()
-            || self.identifier.value().trim().is_empty()
-            || self.title.value().trim().is_empty()
-            || self.state.value().trim().is_empty())
-    }
-}
-
 pub fn parse_issue_id(raw: &str) -> Result<IssueId, DomainError> {
     IssueId::try_new(raw.trim().to_string())
         .map_err(|err| validation_to_domain_error("issue.id", err))

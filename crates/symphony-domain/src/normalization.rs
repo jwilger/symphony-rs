@@ -29,10 +29,6 @@ pub fn sanitize_workspace_key(raw: &str) -> String {
     }
 }
 
-pub fn has_path_separator(raw: &str) -> bool {
-    raw.contains('/') || raw.contains('\\')
-}
-
 pub fn parse_comma_separated(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(str::trim)

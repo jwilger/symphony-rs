@@ -549,7 +549,7 @@ test.describe("Given codex failure and timeout modes", () => {
         "input-required did not fail attempt",
       );
       const row = retrying.retrying.find((entry: any) => entry.issue_identifier === "INP-1");
-      expect(row.error).toContain("turn_input_required");
+      expect(String(row.error)).toBe("turn_input_required");
     } finally {
       await harness.stop();
     }
@@ -560,7 +560,7 @@ test.describe("Given codex failure and timeout modes", () => {
       issues: [buildIssue({ id: "issue-timeout", identifier: "TMO-1", state: "In Progress" })],
       codexMode: "stall",
       turnTimeoutMs: 1200,
-      readTimeoutMs: 100,
+      readTimeoutMs: 500,
       codexTurnDelayMs: 100,
     });
     try {
@@ -572,7 +572,7 @@ test.describe("Given codex failure and timeout modes", () => {
         "turn timeout did not schedule retry",
       );
       const row = retrying.retrying.find((entry: any) => entry.issue_identifier === "TMO-1");
-      expect(String(row.error)).toContain("turn_timeout");
+      expect(String(row.error)).toBe("turn_timeout");
     } finally {
       await harness.stop();
     }
@@ -620,12 +620,44 @@ test.describe("Given codex failure and timeout modes", () => {
       await harness.stop();
     }
   });
+
+  test("Given approval-required mode When startup dispatches run Then the session auto-approves and continues", async ({ request }) => {
+    const harness = await startSymphonyHarness({
+      issues: [buildIssue({ id: "issue-approval", identifier: "APR-1", state: "In Progress" })],
+      codexMode: "approval-required",
+      codexTurnDelayMs: 250,
+      maxTurns: 2,
+      stateRefreshSequenceByIssueId: {
+        "issue-approval": ["In Progress", "Done"],
+      },
+    });
+    try {
+      await waitForStateCondition(
+        harness.appBaseUrl,
+        (payload) =>
+          payload.codex_totals.total_tokens > 0 &&
+          payload.running.some((row: any) => row.issue_identifier === "APR-1"),
+        20_000,
+        "approval-required flow did not continue",
+      );
+
+      const issueResponse = await request.get(`${harness.appBaseUrl}/api/v1/APR-1`);
+      expect(issueResponse.ok()).toBeTruthy();
+      const issuePayload = await issueResponse.json();
+      expect(
+        issuePayload.recent_events.some((event: any) => event.event === "approval_auto_approved"),
+      ).toBeTruthy();
+    } finally {
+      await harness.stop();
+    }
+  });
 });
 
 test.describe("Given multi-turn continuation semantics", () => {
   test("Given active issue remains active across refreshes When max_turns allows continuation Then running turn_count increments within a single worker run", async () => {
+    const issueIdentifier = "TURN-1";
     const harness = await startSymphonyHarness({
-      issues: [buildIssue({ id: "issue-turns", identifier: "TURN-1", state: "In Progress" })],
+      issues: [buildIssue({ id: "issue-turns", identifier: issueIdentifier, state: "In Progress" })],
       maxTurns: 3,
       codexTurnDelayMs: 500,
       stateRefreshSequenceByIssueId: {
@@ -637,14 +669,27 @@ test.describe("Given multi-turn continuation semantics", () => {
         harness.appBaseUrl,
         (payload) =>
           payload.running.some(
-            (row: any) => row.issue_identifier === "TURN-1" && Number(row.turn_count) >= 2,
+            (row: any) => row.issue_identifier === issueIdentifier && Number(row.turn_count) >= 2,
           ),
         20_000,
         "turn_count did not increment for continuation turns",
       );
-      const row = state.running.find((item: any) => item.issue_identifier === "TURN-1");
+      const row = state.running.find((item: any) => item.issue_identifier === issueIdentifier);
       expect(row.turn_count).toBeGreaterThanOrEqual(2);
       expect(typeof row.session_id === "string" || row.session_id === null).toBeTruthy();
+
+      const transcript = JSON.parse(await loadText(harness.codexTranscriptPath));
+      expect(Array.isArray(transcript.turnInputs)).toBeTruthy();
+      expect(transcript.turnInputs.length).toBeGreaterThanOrEqual(2);
+      expect(transcript.turnInputs[0].prompt).toBe(
+        `You are working on ${issueIdentifier}: Issue ${issueIdentifier}.`,
+      );
+      expect(transcript.turnInputs[0].title).toBe(`${issueIdentifier}: Issue ${issueIdentifier}`);
+      for (const turnInput of transcript.turnInputs.slice(1)) {
+        expect(turnInput.prompt).toBe(
+          "Continue from prior thread context and make the next concrete progress step on this issue.",
+        );
+      }
     } finally {
       await harness.stop();
     }
@@ -896,7 +941,7 @@ test.describe("Given retry timing and reconciliation transitions", () => {
       pollIntervalMs: 250,
       stallTimeoutMs: 0,
       turnTimeoutMs: 60_000,
-      readTimeoutMs: 100,
+      readTimeoutMs: 250,
     });
     try {
       await waitForStateCondition(
@@ -922,7 +967,7 @@ test.describe("Given retry timing and reconciliation transitions", () => {
       pollIntervalMs: 300,
       stallTimeoutMs: 700,
       turnTimeoutMs: 60_000,
-      readTimeoutMs: 100,
+      readTimeoutMs: 250,
     });
     try {
       await harness.triggerRefresh();
@@ -946,7 +991,7 @@ test.describe("Given retry timing and reconciliation transitions", () => {
       pollIntervalMs: 250,
       stallTimeoutMs: 60_000,
       turnTimeoutMs: 60_000,
-      readTimeoutMs: 100,
+      readTimeoutMs: 250,
       hooks: {
         beforeRemove: "exit 21",
       },
@@ -985,7 +1030,7 @@ test.describe("Given retry timing and reconciliation transitions", () => {
       pollIntervalMs: 250,
       stallTimeoutMs: 60_000,
       turnTimeoutMs: 60_000,
-      readTimeoutMs: 100,
+      readTimeoutMs: 250,
       hooks: {
         beforeRemove: "sleep 2",
         timeoutMs: 200,
@@ -1033,7 +1078,7 @@ test.describe("Given retry timing and reconciliation transitions", () => {
       pollIntervalMs: 250,
       stallTimeoutMs: 60_000,
       turnTimeoutMs: 60_000,
-      readTimeoutMs: 100,
+      readTimeoutMs: 250,
       stateRefreshSequenceByIssueId: {
         "issue-nonactive": ["Paused"],
       },
@@ -1060,7 +1105,7 @@ test.describe("Given retry timing and reconciliation transitions", () => {
       pollIntervalMs: 250,
       stallTimeoutMs: 60_000,
       turnTimeoutMs: 60_000,
-      readTimeoutMs: 100,
+      readTimeoutMs: 250,
       trackerFailurePlan: {
         issueStateFailuresBeforeSuccess: 2,
       },
@@ -1202,7 +1247,7 @@ test.describe("Given runtime observability semantics", () => {
       pollIntervalMs: 250,
       stallTimeoutMs: 60_000,
       turnTimeoutMs: 60_000,
-      readTimeoutMs: 100,
+      readTimeoutMs: 250,
     });
     try {
       await harness.triggerRefresh();

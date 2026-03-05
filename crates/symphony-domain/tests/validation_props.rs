@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use symphony_domain::{
     EnvResolvedValue, normalize_state_name, parse_env_resolved_value, parse_issue_state,
-    parse_label, parse_state_list, sanitize_workspace_key,
+    parse_label, parse_positive_count, parse_state_list, sanitize_workspace_key,
 };
 
 proptest! {
@@ -35,7 +35,7 @@ proptest! {
         let parsed = parse_label(&label);
         prop_assert!(parsed.is_ok());
         let parsed = parsed.expect("parser already checked as ok");
-        prop_assert_eq!(parsed.value(), parsed.value().to_lowercase());
+        prop_assert_eq!(parsed.as_ref(), parsed.as_ref().to_lowercase());
     }
 
     #[test]
@@ -50,4 +50,11 @@ fn state_list_parser_keeps_order_and_non_empty_entries() {
     let names: Vec<&str> = states.iter().map(|state| state.value()).collect();
 
     assert_eq!(names, vec!["Todo", "In Progress", "Done"]);
+}
+
+#[test]
+fn positive_count_parser_uses_default_for_non_positive_values() {
+    let parsed = parse_positive_count("agent.max_turns", 0, 7).expect("default should parse");
+
+    assert_eq!(parsed.value(), 7);
 }

@@ -119,18 +119,6 @@ impl SessionId {
     }
 }
 
-impl ThreadId {
-    pub fn value(&self) -> &str {
-        self.as_ref()
-    }
-}
-
-impl TurnId {
-    pub fn value(&self) -> &str {
-        self.as_ref()
-    }
-}
-
 impl TokenCount {
     pub fn value(&self) -> u64 {
         self.into_inner()
@@ -140,12 +128,6 @@ impl TokenCount {
 impl TurnCount {
     pub fn value(&self) -> u32 {
         self.into_inner()
-    }
-}
-
-impl RuntimeState {
-    pub fn running_count(&self) -> usize {
-        self.running.len()
     }
 }
 
