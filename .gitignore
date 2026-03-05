@@ -1,0 +1,12 @@
+/target
+/.idea
+/.vscode
+/.DS_Store
+node_modules
+package-lock.json
+bun.lockb
+playwright-report
+test-results
+.nyc_output
+coverage
+.DS_Store

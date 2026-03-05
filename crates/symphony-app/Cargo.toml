@@ -1,0 +1,66 @@
+[package]
+name = "symphony-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait = "0.1.89"
+axum.workspace = true
+chrono.workspace = true
+clap = { version = "4.5.60", features = ["derive"] }
+futures.workspace = true
+leptos.workspace = true
+leptos_axum.workspace = true
+leptos_meta.workspace = true
+leptos_router.workspace = true
+liquid.workspace = true
+notify.workspace = true
+parking_lot.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+symphony-core = { version = "0.1.0", path = "../symphony-core" }
+symphony-domain = { version = "0.1.0", path = "../symphony-domain" }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+wasm-bindgen = { version = "0.2.114", optional = true }
+
+[features]
+default = ["ssr"]
+ssr = [
+  "leptos/ssr",
+  "leptos_meta/ssr",
+  "leptos_router/ssr",
+  "leptos_axum/default",
+]
+hydrate = [
+  "dep:wasm-bindgen",
+  "leptos/hydrate",
+]
+
+[package.metadata.leptos]
+output-name = "symphony-app"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+end2end-cmd = "bun run test:e2e"
+bin-features = ["ssr"]
+lib-features = ["hydrate"]

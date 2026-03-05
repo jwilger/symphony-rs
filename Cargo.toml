@@ -1,0 +1,63 @@
+[workspace]
+members = [
+  "crates/symphony-domain",
+  "crates/symphony-core",
+  "crates/symphony-app",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["John Wilger"]
+license = "MIT"
+repository = "https://github.com/jwilger/symphony-rs"
+description = "Symphony orchestration service and dashboard implemented in Rust."
+readme = "README.md"
+keywords = ["agents", "automation", "orchestration", "workflow", "linear"]
+categories = ["command-line-utilities", "development-tools", "web-programming"]
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+axum = { version = "0.8.4", features = ["macros", "json"] }
+chrono = { version = "0.4.42", features = ["serde"] }
+futures = "0.3.31"
+liquid = "0.26.10"
+leptos = { version = "0.8.17", default-features = false }
+leptos_axum = { version = "0.8.8", default-features = false }
+leptos_meta = { version = "0.8.6", default-features = false }
+leptos_router = { version = "0.8.12", default-features = false }
+notify = "8.2.0"
+nutype = { version = "0.6.2", features = ["regex", "serde"] }
+parking_lot = "0.12.4"
+reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+serde_yaml = "0.9.34"
+thiserror = "2.0.16"
+tokio = { version = "1.47.1", features = ["full"] }
+tokio-util = "0.7.16"
+tower = "0.5.2"
+tower-http = { version = "0.6.6", features = ["trace", "fs"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json", "fmt"] }
+url = "2.5.7"
+uuid = { version = "1.18.1", features = ["serde", "v4"] }
+
+[workspace.lints.clippy]
+all = "deny"
+cargo = "deny"
+complexity = "deny"
+correctness = "deny"
+perf = "deny"
+style = "deny"
+suspicious = "deny"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+warnings = "forbid"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

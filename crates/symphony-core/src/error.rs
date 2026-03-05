@@ -1,0 +1,31 @@
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum WorkflowError {
+    #[error("missing_workflow_file")]
+    MissingWorkflowFile,
+    #[error("workflow_parse_error: {0}")]
+    WorkflowParseError(String),
+    #[error("workflow_front_matter_not_a_map")]
+    WorkflowFrontMatterNotAMap,
+}
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("unsupported_tracker_kind")]
+    UnsupportedTrackerKind,
+    #[error("missing_tracker_api_key")]
+    MissingTrackerApiKey,
+    #[error("missing_tracker_project_slug")]
+    MissingTrackerProjectSlug,
+    #[error("invalid_config: {0}")]
+    InvalidConfig(String),
+}
+
+#[derive(Debug, Error)]
+pub enum PromptError {
+    #[error("template_parse_error: {0}")]
+    TemplateParseError(String),
+    #[error("template_render_error: {0}")]
+    TemplateRenderError(String),
+}

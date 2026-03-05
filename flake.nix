@@ -112,6 +112,7 @@
             git-spice
             pre-commit
             nodejs_22
+            bun
             glow
             just
             jq

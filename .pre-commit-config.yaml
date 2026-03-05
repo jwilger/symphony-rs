@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: docs-sync-required
+        name: docs-sync-required
+        entry: scripts/check-doc-sync.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
