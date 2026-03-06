@@ -11,10 +11,13 @@
     clippy::multiple_crate_versions
 )]
 
+#[cfg(feature = "ssr")]
 mod service;
+#[cfg(feature = "ssr")]
 mod ui;
 
 #[cfg(feature = "hydrate")]
 mod hydrate;
 
+#[cfg(feature = "ssr")]
 pub use service::run;

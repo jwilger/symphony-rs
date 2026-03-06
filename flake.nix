@@ -19,6 +19,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         projectName = "symphony-rs";
+        wasmBindgenCliVersion = "0.2.114";
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
           inherit system overlays;
@@ -30,6 +31,7 @@
           then pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml
           else pkgs.rust-bin.stable.latest.default.override {
             extensions = [ "rustfmt" "clippy" "rust-src" "rust-analyzer" ];
+            targets = [ "wasm32-unknown-unknown" ];
           };
 
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
@@ -134,9 +136,28 @@
           ];
 
           shellHook = ''
-            export PATH="''${PWD}/bin:''${PATH}"
+            export SYMPHONY_WASM_BINDGEN_CLI_VERSION="${wasmBindgenCliVersion}"
+            export SYMPHONY_CARGO_TOOL_ROOT="''${PWD}/.cargo-tools/wasm-bindgen-cli-''${SYMPHONY_WASM_BINDGEN_CLI_VERSION}"
+            export PATH="''${SYMPHONY_CARGO_TOOL_ROOT}/bin:''${PWD}/bin:''${PATH}"
             export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
             export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+            ensure_cargo_tool() {
+              local bin_name="$1"
+              local crate_name="$2"
+              local crate_version="$3"
+              local tool_path="''${SYMPHONY_CARGO_TOOL_ROOT}/bin/''${bin_name}"
+
+              if [ -x "''${tool_path}" ] && [ "$("''${tool_path}" --version | awk 'NR==1 { print $2 }')" = "''${crate_version}" ]; then
+                return 0
+              fi
+
+              rm -rf "''${SYMPHONY_CARGO_TOOL_ROOT}"
+              echo "Installing ''${crate_name} ''${crate_version} into ''${SYMPHONY_CARGO_TOOL_ROOT}"
+              cargo install                 --locked                 --root "''${SYMPHONY_CARGO_TOOL_ROOT}"                 --version "''${crate_version}"                 "''${crate_name}"
+            }
+
+            ensure_cargo_tool wasm-bindgen wasm-bindgen-cli "''${SYMPHONY_WASM_BINDGEN_CLI_VERSION}"
             git config --local rebase.updateRefs true 2>/dev/null || true
             git config --local --unset core.hooksPath 2>/dev/null || true
             pre-commit install 2>/dev/null || true

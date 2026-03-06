@@ -17,3 +17,8 @@ Rust implementation of the Symphony service orchestration specification.
 - `AGENTS.md` defines contributor and coding-agent operating rules.
 - Rust test suites run with `cargo nextest run --workspace`.
 - `e2e/` acceptance tests are executed with Bun + Playwright.
+
+## Development Workflow
+
+- Use `nix develop` for the project shell; it provisions the `wasm32-unknown-unknown` target and ensures the exact `wasm-bindgen-cli` version pinned in `flake.nix` is installed under `./.cargo-tools/` before Leptos builds run.
+- `cargo leptos watch` builds `crates/symphony-app` as an SSR binary plus a hydrated browser bundle, matching the repository's Leptos SSR + hydration contract.
