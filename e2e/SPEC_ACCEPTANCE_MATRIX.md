@@ -82,11 +82,15 @@ Legend:
 | ID | SPEC Ref | Requirement | Scenario | Status |
 |---|---|---|---|---|
 | API-001 | 13.7.1 | Dashboard at `/` renders runtime view | Given running service, dashboard SSR heading and sections render | VALIDATED |
-| API-002 | 13.7.2 | `GET /api/v1/state` returns baseline runtime schema | Given running service, state payload includes required summary fields and types | VALIDATED |
-| API-003 | 13.7.2 | `GET /api/v1/{issue_identifier}` returns issue debug view | Given tracked issue, issue endpoint returns running/retry debug payload | VALIDATED |
-| API-004 | 13.7.2 | Unknown issue returns `404` envelope | Given unknown identifier, endpoint returns `issue_not_found` error envelope | VALIDATED |
-| API-005 | 13.7.2 | `POST /api/v1/refresh` returns accepted payload | Given refresh request, endpoint returns `202` with operations list | VALIDATED |
-| API-006 | 13.7.2 | Unsupported methods return `405` | Given unsupported HTTP methods on API routes, responses are `405` | VALIDATED |
+| API-001A | 13.7.1 | Dashboard at `/` renders current running counts and rows | Given stable running runtime state, SSR dashboard running count and current issue row render | VALIDATED |
+| API-001B | 13.7.1 | Dashboard at `/` renders queued retries | Given queued retry state, SSR dashboard retry count and exact error row render | VALIDATED |
+| API-001C | 13.7.1 | Dashboard at `/` renders current totals and rate-limit payload | Given telemetry-rich runtime state, SSR dashboard totals card and rate-limit payload render | VALIDATED |
+| API-002 | 13.7.1, 13.7.2 | Hydrated dashboard consumes live API without reload | Given hydrated dashboard assets, live controls become ready and refresh updates browser state from `/api/v1/*` without navigation | VALIDATED |
+| API-003 | 13.7.2 | `GET /api/v1/state` returns baseline runtime schema | Given running service, state payload includes required summary fields and types | VALIDATED |
+| API-004 | 13.7.2 | `GET /api/v1/{issue_identifier}` returns issue debug view | Given tracked issue, issue endpoint returns running/retry debug payload | VALIDATED |
+| API-005 | 13.7.2 | Unknown issue returns `404` envelope | Given unknown identifier, endpoint returns `issue_not_found` error envelope | VALIDATED |
+| API-006 | 13.7.2 | `POST /api/v1/refresh` returns accepted payload | Given refresh request, endpoint returns `202` with operations list | VALIDATED |
+| API-007 | 13.7.2 | Unsupported methods return `405` | Given unsupported HTTP methods on API routes, responses are `405` | VALIDATED |
 
 ## Observability and Runtime Semantics
 
@@ -98,7 +102,7 @@ Legend:
 
 ## Pass 3 Summary
 
-- Validated scenarios: 46
+- Validated scenarios: 48
 - Pending scenarios in this matrix: 0
 - Validation evidence:
   - `cd e2e && bun run test:e2e tests/acceptance.spec.ts --reporter=line --workers=1`
@@ -112,7 +116,7 @@ Purpose:
 Implementation:
 - `cargo-mutants` config: `.cargo/mutants.toml`
   - Enables `test_workspace = true`
-  - Adds `-- --include-ignored` so ignored mutation-specific tests are executed.
+  - Adds `--run-ignored all` so ignored mutation-specific tests are executed.
   - Sets `minimum_test_timeout = 180` to allow browser-backed mutation checks to complete.
 - Rust mutation bridge test: `crates/symphony-app/tests/playwright_acceptance.rs`
   - Executes Playwright smoke acceptance suite during mutation runs.
@@ -123,4 +127,4 @@ Implementation:
 Operational note:
 - The full acceptance suite (`tests/acceptance.spec.ts`) remains the conformance gate.
 - The mutation smoke suite exists to make mutation analysis include representative black-box acceptance coverage at practical runtime.
-- `crates/symphony-app/src/hydrate.rs` remains in the stack for cargo-leptos/browser bootstrap, but its current no-op mutant is excluded from mutation gates until the dashboard ships a browser-observable hydrated control path; current acceptance coverage is intentionally anchored at the SSR/API surface.
+- `crates/symphony-app/src/hydrate.rs` is now exercised through a browser-observable dashboard refresh control, so cargo-mutants keeps the hydrate bootstrap in scope via the Playwright mutation smoke suite.

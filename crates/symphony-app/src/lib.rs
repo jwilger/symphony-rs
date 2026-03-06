@@ -13,7 +13,7 @@
 
 #[cfg(feature = "ssr")]
 mod service;
-#[cfg(feature = "ssr")]
+#[cfg(any(feature = "ssr", feature = "hydrate"))]
 mod ui;
 
 #[cfg(feature = "hydrate")]

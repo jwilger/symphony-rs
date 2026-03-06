@@ -1,0 +1,25 @@
+approval_policy = "on-request"
+web_search = "live"
+model = "gpt-5.4"
+model_reasoning_effort = "xhigh"
+sandbox_mode = "danger-full-access"
+
+[agents]
+max_depth = 10
+max_threads = 10
+
+[features]
+apply_patch_freeform = true
+apps = true
+apps_mcp_gateway = true
+child_agents_md = true
+multi_agent = true
+remote_models = true
+request_rule = true
+runtime_metrics = true
+search_tool = true
+shell_snapshot = true
+unified_exec = true
+
+[tui]
+alternate_screen = "auto"

@@ -1,13 +1,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Request as AxumRequest, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
@@ -22,6 +22,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 
@@ -37,7 +38,7 @@ use symphony_domain::{
     parse_issue_state, parse_issue_title, parse_label, sanitize_workspace_key,
 };
 
-use crate::ui::{DashboardModel, DashboardRow, render_dashboard};
+use crate::ui::{render_dashboard, site_pkg_dir, site_root};
 
 const DEFAULT_PROMPT: &str = "You are working on an issue from Linear.";
 const CONTINUATION_PROMPT: &str =
@@ -293,6 +294,7 @@ enum TurnOutcome {
 
 pub async fn run() -> anyhow::Result<()> {
     configure_logging();
+    let _ = any_spawner::Executor::init_tokio();
 
     let args = CliArgs::parse();
     let workflow_path = discover_workflow_path(args.workflow_path)?;
@@ -1631,17 +1633,7 @@ impl<'a> CodexIo<'a> {
             return Err(AppError::ProtocolError("port_exit".to_string()));
         }
 
-        if line.len() > MAX_PROTOCOL_LINE_BYTES {
-            return Err(AppError::ProtocolError(
-                "protocol line too large".to_string(),
-            ));
-        }
-
-        let trimmed = line.trim();
-        let parsed = serde_json::from_str::<Value>(trimmed)
-            .map_err(|error| AppError::ProtocolError(format!("malformed json line: {error}")))?;
-
-        Ok(ReadResult::Message(parsed))
+        Ok(ReadResult::Message(parse_protocol_message_line(&line)?))
     }
 
     async fn handle_message(&mut self, message: Value) -> Result<(), AppError> {
@@ -1852,12 +1844,25 @@ fn retry_blocked_by_slots(
     current_state_count >= state_limit
 }
 
+fn dashboard_site_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join(site_root())
+}
+
 async fn run_http_server(shared: SharedAppState, port: u16) -> Result<(), AppError> {
+    let site_root_path = dashboard_site_root();
+    let site_pkg_path = site_root_path.join(site_pkg_dir());
+    let package_route = format!("/{}", site_pkg_dir());
+
     let app = Router::new()
         .route("/", get(dashboard_handler))
         .route("/api/v1/state", get(api_state_handler))
         .route("/api/v1/refresh", post(api_refresh_handler))
         .route("/api/v1/{issue_identifier}", get(api_issue_handler))
+        .nest_service(package_route.as_str(), ServeDir::new(site_pkg_path))
+        .fallback_service(ServeDir::new(site_root_path))
         .layer(TraceLayer::new_for_http())
         .with_state(shared);
 
@@ -1874,35 +1879,18 @@ async fn run_http_server(shared: SharedAppState, port: u16) -> Result<(), AppErr
         .map_err(|error| AppError::HttpError(error.to_string()))
 }
 
-async fn dashboard_handler(State(shared): State<SharedAppState>) -> Response {
+async fn dashboard_handler(
+    State(shared): State<SharedAppState>,
+    request: AxumRequest,
+) -> Response {
     let runtime = shared.runtime.lock().await.clone();
     let snapshot = build_runtime_snapshot(&runtime, Utc::now());
+    let handler = leptos_axum::render_app_async_with_context(
+        || {},
+        move || render_dashboard(snapshot.clone()),
+    );
 
-    let rows = snapshot
-        .running
-        .iter()
-        .map(|item| DashboardRow {
-            issue_identifier: item.issue_identifier.clone(),
-            state: item.state.clone(),
-            session_id: item.session_id.clone().unwrap_or_else(|| "-".to_string()),
-            turn_count: item.turn_count,
-            last_event: item.last_event.clone().unwrap_or_else(|| "-".to_string()),
-            total_tokens: item.tokens.total_tokens,
-        })
-        .collect::<Vec<_>>();
-
-    let model = DashboardModel {
-        generated_at: snapshot.generated_at.to_rfc3339(),
-        running_count: snapshot.counts.running,
-        retrying_count: snapshot.counts.retrying,
-        input_tokens: snapshot.codex_totals.input_tokens,
-        output_tokens: snapshot.codex_totals.output_tokens,
-        total_tokens: snapshot.codex_totals.total_tokens,
-        seconds_running: snapshot.codex_totals.seconds_running,
-        rows,
-    };
-
-    Html(render_dashboard(model)).into_response()
+    handler(request).await
 }
 
 async fn api_state_handler(State(shared): State<SharedAppState>) -> Response {
@@ -2070,6 +2058,42 @@ fn load_workflow_file(path: &Path) -> Result<LoadedWorkflow, AppError> {
     })
 }
 
+fn parse_protocol_message_line(line: &str) -> Result<Value, AppError> {
+    if line.len() > MAX_PROTOCOL_LINE_BYTES {
+        return Err(AppError::ProtocolError(
+            "protocol line too large".to_string(),
+        ));
+    }
+
+    let trimmed = line.trim();
+    serde_json::from_str::<Value>(trimmed)
+        .map_err(|error| AppError::ProtocolError(format!("malformed json line: {error}")))
+}
+
+fn workflow_reload_event_matches_path(event: &notify::Event, watched_path: &Path) -> bool {
+    event.paths.iter().any(|path| {
+        path == watched_path || path.canonicalize().is_ok_and(|canonical| canonical == watched_path)
+    })
+}
+
+fn within_workflow_reload_debounce(previous_reload_at: Option<Instant>, now: Instant) -> bool {
+    previous_reload_at.is_some_and(|previous_reload_at| {
+        now.duration_since(previous_reload_at) < Duration::from_millis(50)
+    })
+}
+
+fn workflow_reload_event_should_trigger(event: &notify::Event, watched_path: &Path) -> bool {
+    let kind_triggers_reload = matches!(
+        event.kind,
+        notify::EventKind::Any
+            | notify::EventKind::Create(_)
+            | notify::EventKind::Modify(_)
+            | notify::EventKind::Remove(_)
+    );
+
+    kind_triggers_reload && workflow_reload_event_matches_path(event, watched_path)
+}
+
 fn spawn_workflow_watcher(
     workflow_path: PathBuf,
     sender: UnboundedSender<ServiceEvent>,
@@ -2078,15 +2102,33 @@ fn spawn_workflow_watcher(
         .canonicalize()
         .unwrap_or(workflow_path.clone());
     let callback_path = watched_path.clone();
+    let last_reload_at = Arc::new(StdMutex::new(None::<Instant>));
+    let callback_last_reload_at = Arc::clone(&last_reload_at);
 
     let mut watcher = RecommendedWatcher::new(
         move |event: notify::Result<notify::Event>| {
-            let Ok(_event) = event else {
+            let Ok(event) = event else {
                 return;
             };
 
+            if !workflow_reload_event_should_trigger(&event, &callback_path) {
+                return;
+            }
+
+            let now = Instant::now();
+            let Ok(last_reload_at) = callback_last_reload_at.lock() else {
+                return;
+            };
+            if within_workflow_reload_debounce(*last_reload_at, now) {
+                return;
+            }
+            drop(last_reload_at);
+
             match load_workflow_file(&callback_path) {
                 Ok(loaded) => {
+                    if let Ok(mut last_reload_at) = callback_last_reload_at.lock() {
+                        *last_reload_at = Some(now);
+                    }
                     let _ = sender.send(ServiceEvent::WorkflowReloaded {
                         loaded: Box::new(loaded),
                     });
@@ -2454,8 +2496,12 @@ fn configure_logging() {
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use chrono::Utc;
+    use serde_json::Value;
 
     use symphony_domain::{
         BlockerRef, Issue, PositiveCount, PositiveMs, parse_issue_id, parse_issue_identifier,
@@ -2463,8 +2509,10 @@ mod tests {
     };
 
     use super::{
-        DispatchPolicy, RetryAction, decide_retry_action, graphql_operation_count,
-        initial_runtime_state, is_stalled, parse_state_set, register_running_issue,
+        AppError, DispatchPolicy, MAX_PROTOCOL_LINE_BYTES, RetryAction, decide_retry_action,
+        graphql_operation_count, initial_runtime_state, is_stalled, parse_protocol_message_line,
+        parse_state_set, register_running_issue, within_workflow_reload_debounce,
+        workflow_reload_event_matches_path, workflow_reload_event_should_trigger,
     };
 
     fn make_issue(identifier: &str, state: &str) -> Issue {
@@ -2556,6 +2604,131 @@ mod tests {
 
         let action = decide_retry_action(&issue, &runtime, &policy);
         assert_eq!(action, RetryAction::ReleaseClaim);
+    }
+
+    #[test]
+    fn protocol_line_parser_accepts_exact_limit_and_rejects_larger_lines() {
+        let empty_line = "{\"padding\":\"\"}\n";
+        let exact_fill_len = MAX_PROTOCOL_LINE_BYTES - empty_line.len();
+        let exact_padding = "x".repeat(exact_fill_len);
+        let exact_line = format!("{{\"padding\":\"{}\"}}\n", exact_padding);
+        assert_eq!(exact_line.len(), MAX_PROTOCOL_LINE_BYTES);
+
+        let parsed = parse_protocol_message_line(&exact_line).expect("exact limit should parse");
+        assert_eq!(parsed.get("padding").and_then(Value::as_str), Some(exact_padding.as_str()));
+
+        let oversized_line = format!(
+            "{{\"padding\":\"{}\"}}\n",
+            "x".repeat(exact_fill_len + 1)
+        );
+        assert_eq!(oversized_line.len(), MAX_PROTOCOL_LINE_BYTES + 1);
+
+        let error = parse_protocol_message_line(&oversized_line)
+            .expect_err("oversized protocol line should fail");
+        assert!(matches!(
+            error,
+            AppError::ProtocolError(message) if message == "protocol line too large"
+        ));
+    }
+
+    #[test]
+    fn workflow_reload_event_requires_matching_path() {
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/tmp/OTHER.md")],
+            attrs: Default::default(),
+        };
+
+        assert!(!workflow_reload_event_matches_path(
+            &event,
+            Path::new("/tmp/WORKFLOW.md"),
+        ));
+        assert!(!workflow_reload_event_should_trigger(
+            &event,
+            Path::new("/tmp/WORKFLOW.md"),
+        ));
+    }
+
+    #[test]
+    fn workflow_reload_event_matches_canonical_equivalent_path() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "symphony-reload-path-test-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let nested = temp_root.join("nested");
+        fs::create_dir_all(&nested).expect("temp directories should be created");
+        let workflow_path = temp_root.join("WORKFLOW.md");
+        fs::write(&workflow_path, "tracker:\n  project_slug: demo\n")
+            .expect("workflow file should be written");
+
+        let watched_path = workflow_path
+            .canonicalize()
+            .expect("workflow path should canonicalize");
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![nested.join("..").join("WORKFLOW.md")],
+            attrs: Default::default(),
+        };
+
+        assert!(workflow_reload_event_matches_path(&event, &watched_path));
+
+        fs::remove_file(&workflow_path).expect("workflow file should be removed");
+        fs::remove_dir_all(&temp_root).expect("temp directories should be removed");
+    }
+
+    #[test]
+    fn workflow_reload_event_ignores_access_notifications() {
+        let event = notify::Event {
+            kind: notify::EventKind::Access(notify::event::AccessKind::Any),
+            paths: vec![PathBuf::from("/tmp/WORKFLOW.md")],
+            attrs: Default::default(),
+        };
+
+        assert!(workflow_reload_event_matches_path(
+            &event,
+            Path::new("/tmp/WORKFLOW.md"),
+        ));
+        assert!(!workflow_reload_event_should_trigger(
+            &event,
+            Path::new("/tmp/WORKFLOW.md"),
+        ));
+    }
+
+    #[test]
+    fn workflow_reload_debounce_only_blocks_strictly_earlier_than_boundary() {
+        let now = Instant::now();
+        let inside_window = now
+            .checked_sub(Duration::from_millis(49))
+            .expect("inside-window instant should exist");
+        let boundary = now
+            .checked_sub(Duration::from_millis(50))
+            .expect("boundary instant should exist");
+        let outside_window = now
+            .checked_sub(Duration::from_millis(51))
+            .expect("outside-window instant should exist");
+
+        assert!(within_workflow_reload_debounce(Some(inside_window), now));
+        assert!(!within_workflow_reload_debounce(Some(boundary), now));
+        assert!(!within_workflow_reload_debounce(Some(outside_window), now));
+    }
+
+    #[test]
+    fn workflow_reload_event_triggers_for_modify_on_watched_file() {
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/tmp/WORKFLOW.md")],
+            attrs: Default::default(),
+        };
+
+        assert!(workflow_reload_event_should_trigger(
+            &event,
+            Path::new("/tmp/WORKFLOW.md"),
+        ));
     }
 
     #[test]

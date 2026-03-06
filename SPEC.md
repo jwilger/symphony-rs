@@ -1489,6 +1489,8 @@ Enablement (extension):
 #### 13.7.1 Human-Readable Dashboard (`/`)
 
 - Host a human-readable dashboard at `/`.
+- When using SSR with hydration, serve the generated browser bundle assets (for example `/pkg/*`) from the same app so the shipped dashboard can hydrate in-place.
+- If the dashboard exposes browser-side controls, those controls should operate against the machine-readable API (for example `POST /api/v1/refresh` followed by `GET /api/v1/state`) rather than duplicating orchestration logic in the browser.
 - The returned document should depict the current state of the system (for example active sessions,
   retry delays, token consumption, runtime totals, recent events, and health/error indicators).
 - It is up to the implementation whether this is server-generated HTML or a client-side app that

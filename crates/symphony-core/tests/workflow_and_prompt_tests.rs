@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
-use symphony_core::{parse_workflow, render_issue_prompt};
+use symphony_core::{build_service_config, parse_workflow, render_issue_prompt};
 use symphony_domain::{
     Issue, parse_issue_id, parse_issue_identifier, parse_issue_state, parse_issue_title,
     parse_label,
@@ -84,4 +85,21 @@ fn prompt_rendering_includes_attempt_when_present() {
     .expect("prompt should render");
 
     assert_eq!(prompt, "Issue ABC-123 attempt=3");
+}
+
+
+#[test]
+fn repository_workflow_file_parses_for_local_development() {
+    let workflow_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("WORKFLOW.md");
+    let workflow_contents = std::fs::read_to_string(&workflow_path)
+        .expect("repository WORKFLOW.md should exist");
+    let workflow = parse_workflow(&workflow_contents).expect("repository workflow should parse");
+    let config = build_service_config(&workflow, &std::collections::HashMap::new())
+        .expect("repository workflow should build a service config");
+
+    assert_eq!(config.tracker.project_slug.value(), "DEMO");
+    assert_eq!(config.server.expect("server config should exist").port, 3000);
 }

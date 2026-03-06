@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -23,6 +23,7 @@ type MockIssue = {
 };
 
 type HarnessOptions = {
+  requireHydratedDashboard?: boolean;
   issues: MockIssue[];
   stateRefreshSequenceByIssueId?: Record<string, string[]>;
   codexTurnDelayMs?: number;
@@ -85,6 +86,151 @@ type SymphonyHarness = {
 const E2E_ROOT = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const REPO_ROOT = resolve(E2E_ROOT, "..");
 const CARGO_MANIFEST_PATH = join(REPO_ROOT, "Cargo.toml");
+
+let hydratedDashboardBuildPromise: Promise<void> | null = null;
+const WASM_BINDGEN_CLI_VERSION = process.env.SYMPHONY_WASM_BINDGEN_CLI_VERSION ?? "0.2.114";
+const WASM_BINDGEN_CLI_ROOT = join(REPO_ROOT, ".cargo-tools", `wasm-bindgen-cli-${WASM_BINDGEN_CLI_VERSION}`);
+const WASM_BINDGEN_BIN = join(
+  WASM_BINDGEN_CLI_ROOT,
+  "bin",
+  process.platform === "win32" ? "wasm-bindgen.exe" : "wasm-bindgen",
+);
+
+const HYDRATED_DASHBOARD_ENTRY = join(REPO_ROOT, "target", "site", "pkg", "symphony-app.js");
+const HYDRATED_DASHBOARD_INPUTS = [
+  join(REPO_ROOT, "Cargo.toml"),
+  join(REPO_ROOT, "Cargo.lock"),
+  join(REPO_ROOT, "crates", "symphony-app", "Cargo.toml"),
+  join(REPO_ROOT, "crates", "symphony-app", "src", "hydrate.rs"),
+  join(REPO_ROOT, "crates", "symphony-app", "src", "lib.rs"),
+  join(REPO_ROOT, "crates", "symphony-app", "src", "ui.rs"),
+];
+
+async function hydratedDashboardBuildRequired(): Promise<boolean> {
+  let outputStats;
+  try {
+    outputStats = await stat(HYDRATED_DASHBOARD_ENTRY);
+  } catch {
+    return true;
+  }
+
+  const outputMtimeMs = outputStats.mtimeMs;
+  for (const inputPath of HYDRATED_DASHBOARD_INPUTS) {
+    const inputStats = await stat(inputPath);
+    if (inputStats.mtimeMs > outputMtimeMs) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function commandSucceeds(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<boolean> {
+  return await new Promise<boolean>((resolveCommand) => {
+    const child = spawn(command, args, {
+      cwd: REPO_ROOT,
+      env,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    child.once("error", () => resolveCommand(false));
+    child.once("exit", (code, signal) => resolveCommand(code === 0 && signal === null));
+  });
+}
+
+async function ensureWasmBindgenCli(): Promise<void> {
+  const env = {
+    ...process.env,
+    PATH: `${join(WASM_BINDGEN_CLI_ROOT, "bin")}:${process.env.PATH ?? ""}`,
+  };
+  const hasPinnedBinary = await commandSucceeds(WASM_BINDGEN_BIN, ["--version"], env);
+  if (hasPinnedBinary) {
+    return;
+  }
+
+  await rm(WASM_BINDGEN_CLI_ROOT, { recursive: true, force: true });
+  const status = await new Promise<number>((resolveInstall, rejectInstall) => {
+    const installProcess = spawn(
+      "cargo",
+      [
+        "install",
+        "--locked",
+        "--root",
+        WASM_BINDGEN_CLI_ROOT,
+        "--version",
+        WASM_BINDGEN_CLI_VERSION,
+        "wasm-bindgen-cli",
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+
+    installProcess.stdout?.on("data", (chunk: Buffer) => {
+      process.stdout.write(chunk.toString("utf8"));
+    });
+    installProcess.stderr?.on("data", (chunk: Buffer) => {
+      process.stderr.write(chunk.toString("utf8"));
+    });
+    installProcess.once("error", rejectInstall);
+    installProcess.once("exit", (code, signal) => {
+      if (signal) {
+        rejectInstall(new Error(`cargo install wasm-bindgen-cli terminated by signal=${signal}`));
+        return;
+      }
+      resolveInstall(code ?? 1);
+    });
+  });
+
+  if (status !== 0) {
+    throw new Error(`cargo install wasm-bindgen-cli failed with status=${status}`);
+  }
+}
+
+async function ensureHydratedDashboardAssets(): Promise<void> {
+  if (!(await hydratedDashboardBuildRequired())) {
+    return;
+  }
+
+  if (hydratedDashboardBuildPromise) {
+    return hydratedDashboardBuildPromise;
+  }
+
+  hydratedDashboardBuildPromise = (async () => {
+    const status = await new Promise<number>((resolveBuild, rejectBuild) => {
+      const buildProcess = spawn("nix", ["develop", "-c", "cargo", "leptos", "build"], {
+        cwd: REPO_ROOT,
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      buildProcess.stdout?.on("data", (chunk: Buffer) => {
+        process.stdout.write(chunk.toString("utf8"));
+      });
+      buildProcess.stderr?.on("data", (chunk: Buffer) => {
+        process.stderr.write(chunk.toString("utf8"));
+      });
+      buildProcess.once("error", rejectBuild);
+      buildProcess.once("exit", (code, signal) => {
+        if (signal) {
+          rejectBuild(new Error(`cargo leptos build terminated by signal=${signal}`));
+          return;
+        }
+        resolveBuild(code ?? 1);
+      });
+    });
+
+    if (status !== 0) {
+      throw new Error(`cargo leptos build failed with status=${status}`);
+    }
+  })().catch((error) => {
+    hydratedDashboardBuildPromise = null;
+    throw error;
+  });
+
+  return hydratedDashboardBuildPromise;
+}
 const FAKE_CODEX_PATH = join(E2E_ROOT, "fixtures", "fake-codex-app-server.mjs");
 const DEFAULT_STARTUP_TIMEOUT_MS = 120_000;
 
@@ -422,6 +568,10 @@ async function allocateLoopbackPort(): Promise<number> {
 }
 
 export async function startSymphonyHarness(options: HarnessOptions): Promise<SymphonyHarness> {
+  if (options.requireHydratedDashboard) {
+    await ensureHydratedDashboardAssets();
+  }
+
   const tempRoot = await mkdtemp(join(tmpdir(), "symphony-rs-e2e-"));
   const workspaceRoot = join(tempRoot, "workspaces");
   const workflowPath = join(tempRoot, "WORKFLOW.md");
@@ -476,20 +626,12 @@ export async function startSymphonyHarness(options: HarnessOptions): Promise<Sym
   const appCwd = options.useDefaultWorkflowPath ? tempRoot : REPO_ROOT;
   const preferredBinary = process.env.SYMPHONY_APP_BIN
     ? resolve(process.env.SYMPHONY_APP_BIN)
-    : join(REPO_ROOT, "target", "debug", "symphony-app");
+    : null;
   const runEnv = {
     ...process.env,
     LINEAR_API_KEY: process.env.LINEAR_API_KEY ?? "e2e-token",
   };
-  const useBinary = await (async () => {
-    try {
-      await access(preferredBinary);
-      return true;
-    } catch {
-      return false;
-    }
-  })();
-  const appProcess = useBinary
+  const appProcess = preferredBinary
     ? spawn(preferredBinary, appArgs, {
         cwd: appCwd,
         env: runEnv,

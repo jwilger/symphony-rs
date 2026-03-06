@@ -48,6 +48,48 @@ function buildIssue(args: {
 }
 
 test.describe("Mutation smoke acceptance", () => {
+  test("Given hydrated dashboard When runtime state changes Then refresh updates the browser without reload", async ({ page, request }) => {
+    const harness = await startSymphonyHarness({
+      requireHydratedDashboard: true,
+      issues: [buildIssue({ id: "issue-mut-hydrate", identifier: "MUT-HYD-1", state: "In Progress" })],
+      codexTurnDelayMs: 5_000,
+      stateRefreshSequenceByIssueId: {
+        "issue-mut-hydrate": ["Done"],
+      },
+    });
+    try {
+      await waitForStateCondition(
+        harness.appBaseUrl,
+        (payload) => payload.running.some((row: any) => row.issue_identifier === "MUT-HYD-1"),
+        20_000,
+        "hydrated mutation scenario never reached running state",
+      );
+
+      const assetResponse = await request.get(`${harness.appBaseUrl}/pkg/symphony-app.js`);
+      expect(assetResponse.ok()).toBeTruthy();
+
+      await page.goto(`${harness.appBaseUrl}/`);
+      await expect(page.getByText("MUT-HYD-1")).toBeVisible();
+      await expect(page.getByTestId("dashboard-live-status")).toHaveText("Live dashboard ready");
+
+      await harness.triggerRefresh();
+      await waitForStateCondition(
+        harness.appBaseUrl,
+        (payload) => payload.counts.running === 0,
+        20_000,
+        "server state did not drain in hydrated mutation scenario",
+      );
+
+      await expect(page.getByText("MUT-HYD-1")).toBeVisible();
+      await page.getByRole("button", { name: "Refresh dashboard" }).click();
+      await expect(page.getByRole("status")).toHaveText("Dashboard updated from live state");
+      await expect(page.getByTestId("running-count")).toHaveText("0");
+      await expect(page.getByText("MUT-HYD-1")).not.toBeVisible();
+    } finally {
+      await harness.stop();
+    }
+  });
+
   test("Given dispatchable issue When startup tick runs Then run lifecycle, issue API, and workspace persistence behave correctly", async ({
     request,
   }) => {

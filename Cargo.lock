@@ -2738,12 +2738,15 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "symphony-app"
 version = "0.1.0"
 dependencies = [
+ "any_spawner",
  "anyhow",
  "async-trait",
  "axum",
  "chrono",
  "clap",
  "futures",
+ "gloo-net",
+ "hydration_context",
  "leptos",
  "leptos_axum",
  "leptos_meta",
@@ -2767,6 +2770,7 @@ dependencies = [
  "url",
  "uuid",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

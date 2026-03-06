@@ -57,6 +57,7 @@ test.describe("Given an idle Symphony service", () => {
   test.beforeAll(async () => {
     harness = await startSymphonyHarness({
       issues: [],
+      requireHydratedDashboard: true,
     });
   });
 
@@ -73,7 +74,57 @@ test.describe("Given an idle Symphony service", () => {
 
     await page.goto(`${service.appBaseUrl}/`);
     await expect(page.getByRole("heading", { name: "Symphony Runtime" })).toBeVisible();
-    await expect(page.getByText("Running Sessions")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Running Sessions" })).toBeVisible();
+  });
+
+  test("Given hydrated dashboard assets When the page boots Then live controls become ready", async ({ page }) => {
+    const service = harness!;
+
+    await page.goto(`${service.appBaseUrl}/`);
+    await expect(page.getByTestId("dashboard-generated-at")).toBeVisible();
+    await expect(page.getByTestId("dashboard-live-status")).toHaveText("Live dashboard ready");
+  });
+
+  test("Given hydrated dashboard assets When the page boots Then hydration reuses the SSR DOM in place", async ({ page }) => {
+    const service = harness!;
+    let releaseWasmLoad!: () => void;
+    const wasmGate = new Promise<void>((resolve) => {
+      releaseWasmLoad = resolve;
+    });
+
+    await page.route("**/pkg/*.wasm", async (route) => {
+      await wasmGate;
+      await route.continue();
+    });
+
+    await page.goto(`${service.appBaseUrl}/`, { waitUntil: "commit" });
+    await expect(page.getByTestId("dashboard-refresh")).toBeVisible();
+    await expect(page.getByTestId("dashboard-live-status")).toHaveText("Hydration pending");
+
+    const initialMain = await page.locator("#symphony-dashboard-root").elementHandle();
+    const initialRefreshButton = await page.getByTestId("dashboard-refresh").elementHandle();
+
+    expect(initialMain).not.toBeNull();
+    expect(initialRefreshButton).not.toBeNull();
+
+    releaseWasmLoad();
+
+    await expect(page.getByTestId("dashboard-live-status")).toHaveText("Live dashboard ready");
+    await expect(page.getByTestId("dashboard-refresh")).toBeEnabled();
+
+    const sameMain = await initialMain!.evaluate(
+      (node) => node === document.querySelector("#symphony-dashboard-root"),
+    );
+    const mainConnected = await initialMain!.evaluate((node) => node.isConnected);
+    const sameButton = await initialRefreshButton!.evaluate(
+      (node) => node === document.querySelector('[data-testid="dashboard-refresh"]'),
+    );
+    const buttonConnected = await initialRefreshButton!.evaluate((node) => node.isConnected);
+
+    expect(sameMain).toBeTruthy();
+    expect(mainConnected).toBeTruthy();
+    expect(sameButton).toBeTruthy();
+    expect(buttonConnected).toBeTruthy();
   });
 
   test("Given idle state When requesting /api/v1/state Then response follows baseline runtime schema", async ({ request }) => {
@@ -172,6 +223,34 @@ test.describe("Given an idle Symphony service", () => {
       await writeFile(service.workflowPath, originalWorkflow, "utf8");
     }
   });
+});
+
+test("Given stable running runtime state When requesting dashboard Then SSR shows current running counts and rows", async ({ page }) => {
+  const harness = await startSymphonyHarness({
+    issues: [buildIssue({ id: "issue-ssr-running", identifier: "SSR-RUN-1", state: "In Progress" })],
+    codexMode: "stall",
+    pollIntervalMs: 250,
+    stallTimeoutMs: 60_000,
+    turnTimeoutMs: 60_000,
+    readTimeoutMs: 250,
+    codexTurnDelayMs: 100,
+  });
+  try {
+    await harness.triggerRefresh();
+    const runningState = await waitForStateCondition(
+      harness.appBaseUrl,
+      (state) => state.running.some((row: any) => row.issue_identifier === "SSR-RUN-1"),
+      20_000,
+      "SSR running dashboard scenario did not reach active state",
+    );
+
+    await page.goto(`${harness.appBaseUrl}/`);
+    await expect(page.getByTestId("running-count")).toHaveText(String(runningState.counts.running));
+    await expect(page.getByTestId("retrying-count")).toHaveText(String(runningState.counts.retrying));
+    await expect(page.getByRole("cell", { name: "SSR-RUN-1" })).toBeVisible();
+  } finally {
+    await harness.stop();
+  }
 });
 
 test.describe("Given a dispatchable active issue", () => {
@@ -285,6 +364,26 @@ test.describe("Given a dispatchable active issue", () => {
     );
   });
 
+  test("Given telemetry-rich runtime state When requesting dashboard Then SSR shows totals and rate limits", async ({ page }) => {
+    const service = harness!;
+    const telemetryState = await waitForStateCondition(
+      service.appBaseUrl,
+      (state) =>
+        state.codex_totals.total_tokens > 0 &&
+        state.codex_totals.input_tokens > 0 &&
+        state.codex_totals.output_tokens > 0 &&
+        state.rate_limits !== null,
+      30_000,
+      "dashboard SSR telemetry scenario did not reach a visible runtime snapshot",
+    );
+
+    await page.goto(`${service.appBaseUrl}/`);
+    await expect(page.getByTestId("total-tokens")).toHaveText(
+      String(telemetryState.codex_totals.total_tokens),
+    );
+    await expect(page.getByTestId("dashboard-rate-limits")).toContainText("requests_remaining");
+  });
+
   test("Given worker completion and continuation retry When issue becomes non-active Then retry queue drains and claim is released", async ({ request }) => {
     const service = harness!;
 
@@ -303,6 +402,61 @@ test.describe("Given a dispatchable active issue", () => {
     const service = harness!;
     const workspacePath = join(service.workspaceRoot, issueIdentifier);
     await access(workspacePath);
+  });
+});
+
+test.describe("Given a hydrated dashboard", () => {
+  let harness: Awaited<ReturnType<typeof startSymphonyHarness>> | null = null;
+
+  test.beforeAll(async () => {
+    harness = await startSymphonyHarness({
+      requireHydratedDashboard: true,
+      issues: [buildIssue({ id: "issue-hydrated", identifier: "HYD-1", state: "In Progress" })],
+      codexTurnDelayMs: 5_000,
+      stateRefreshSequenceByIssueId: {
+        "issue-hydrated": ["Done"],
+      },
+    });
+  });
+
+  test.afterAll(async () => {
+    if (!harness) {
+      return;
+    }
+    await harness.stop();
+    harness = null;
+  });
+
+  test("Given hydrated dashboard assets When runtime state changes Then refresh updates the browser without reload", async ({ page, request }) => {
+    const service = harness!;
+
+    await waitForStateCondition(
+      service.appBaseUrl,
+      (state) => state.running.some((row: any) => row.issue_identifier === "HYD-1"),
+      30_000,
+      "hydrated dashboard scenario never reached running state",
+    );
+
+    const assetResponse = await request.get(`${service.appBaseUrl}/pkg/symphony-app.js`);
+    expect(assetResponse.ok()).toBeTruthy();
+
+    await page.goto(`${service.appBaseUrl}/`);
+    await expect(page.getByText("HYD-1")).toBeVisible();
+    await expect(page.getByTestId("dashboard-live-status")).toHaveText("Live dashboard ready");
+
+    await service.triggerRefresh();
+    await waitForStateCondition(
+      service.appBaseUrl,
+      (state) => state.counts.running === 0,
+      30_000,
+      "server state did not drain after hydrated refresh trigger",
+    );
+
+    await expect(page.getByText("HYD-1")).toBeVisible();
+    await page.getByTestId("dashboard-refresh").click();
+    await expect(page.getByTestId("dashboard-live-status")).toHaveText("Dashboard updated from live state");
+    await expect(page.getByTestId("running-count")).toHaveText("0");
+    await expect(page.getByText("HYD-1")).not.toBeVisible();
   });
 });
 
@@ -550,6 +704,32 @@ test.describe("Given codex failure and timeout modes", () => {
       );
       const row = retrying.retrying.find((entry: any) => entry.issue_identifier === "INP-1");
       expect(String(row.error)).toBe("turn_input_required");
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  test("Given queued retry state When requesting dashboard Then SSR shows retry rows and exact error details", async ({ page }) => {
+    const harness = await startSymphonyHarness({
+      issues: [buildIssue({ id: "issue-input-dashboard", identifier: "INP-SSR-1", state: "In Progress" })],
+      codexMode: "input-required",
+      codexTurnDelayMs: 100,
+    });
+    try {
+      await harness.triggerRefresh();
+      const retrying = await waitForStateCondition(
+        harness.appBaseUrl,
+        (payload) => payload.retrying.some((row: any) => row.issue_identifier === "INP-SSR-1"),
+        20_000,
+        "retrying dashboard scenario did not produce a queued retry",
+      );
+      const row = retrying.retrying.find((entry: any) => entry.issue_identifier === "INP-SSR-1");
+      expect(String(row.error)).toBe("turn_input_required");
+
+      await page.goto(`${harness.appBaseUrl}/`);
+      await expect(page.getByTestId("retrying-count")).toHaveText(String(retrying.counts.retrying));
+      await expect(page.getByRole("cell", { name: "INP-SSR-1" })).toBeVisible();
+      await expect(page.getByText("turn_input_required")).toBeVisible();
     } finally {
       await harness.stop();
     }
